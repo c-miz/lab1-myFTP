@@ -1,8 +1,178 @@
 #include <iostream>
+#include <iomanip>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <cstring>
+#include <arpa/inet.h>
+#define MAXLINE 4096
+
+using namespace std;
+struct Header{
+    byte m_protocol[6]; /* protocol magic number (6 bytes) */
+    type m_type;                          /* type (1 byte) */
+    status m_status;                      /* status (1 byte) */
+    uint32_t m_length;                    /* length (4 bytes) in Big endian*/
+    Header(type t,status s,uint32_t l):m_type(t),m_status(s),m_length(l){
+        m_protocol[0]=\xc1;
+        m_protocol[1]=\xa1;
+        m_protocol[2]=\x10;
+        m_protocol[3]='f';
+        m_protocol[4]='t';
+        m_protocol[5]='p';
+    }                   
+}__attribute__ ((packed));
+bool checkHeader(const char* buf){
+    return buf[0]=='\xc1'&&buf[1]=='\xa1'&&buf[2]=='\x10'&&buf[3]=='f'&&buf[4]=='t'&&buf[5]=='p';
+}
+struct sockaddr_in server_addr;
+class Client{
+    private:
+    bool isConnected;
+    int sockfd;
+    public:
+    void open(string ip,int port){
+        sockfd=socket(AF_INET,SOCK_STREAM,0);
+        bzero(&server_addr,sizeof(server_addr));
+        server_addr.sin_family=AF_INET;
+        server_addr.sin_port=htons(port);
+        inet_pton(AF_INET,ip.c_str(),&server_addr.sin_addr);
+        int result=connect(sockfd,(struct sockaddr*)&server_addr,sizeof(server_addr));
+        if(result<0){
+            cerr<<"Error: Unable to connect to server"<<endl;
+            return; }
+        else{
+            cout<<"Connected to server "<<ip<<":"<<port<<endl;
+        }
+        Header header(0xA1,0,12);
+        ssize_t n=write(sockfd,&header,sizeof(header));
+        if(n<0){
+            cerr<<"Error: Unable to send header to server"<<endl;
+            return;
+        }
+        ssize_t n;
+        char buf[MAXLINE];
+        n=read(sockfd,buf,MAXLINE);
+        if(n<0){
+            cerr<<"Error: Unable to read header from server"<<endl;
+            return;
+        }
+        if(checkHeader(buf)){
+            type type=buf[6];
+            status status=buf[7];
+            uint32_t length=ntohl(*(uint32_t*)(buf+8));
+            if(type==0xA2&&status==1){
+                cout<<"Connected to server"<<endl;
+                isConnected=true;
+            }
+                if(n<0){
+                    cerr<<"Error: Unable to send header to client"<<endl;
+                }
+
+            }
+        else{
+            cerr<<"Error: Invalid header received"<<endl;
+        }
+        return;
+    }
+    void ls(){
+        if(!isConnected){
+            cerr<<"Error: Not connected to server"<<endl;
+            return;
+        }
+        Header header(0xA3,0,12);
+        ssize_t n=write(sockfd,&header,sizeof(header));
+        if(n<0){
+            cerr<<"Error: Unable to send header to server"<<endl;
+            return;
+        }
+        
+
+    }
+    void cd(string directory){}
+    void get(string filename){}
+    void put(string filename){}
+    void sha256(string filename){}
+    void quit(){}
+
+};
+vector<string> parseCommand(const string& line) {
+    vector<string> arguments;
+    istringstream input(line);
+    string argument;
+
+    while (input >> quoted(argument)) {
+        arguments.push_back(argument);
+    }
+
+    return arguments;
+}
 
 int main() {
-    std::cerr << "hello from ftp client" << std::endl;
+    Client client;
+    string line;
+    while (true) {
+        cout << "ftp> ";
+        getline(cin, line);
+        vector<string> arguments=parseCommand(line);
+        if(arguments.empty()){
+            continue;
+        }
+        string command=arguments[0];
+        if(command=="open"){
+            if(arguments.size()!=3){
+                cout<<"Usage: open <ip> <port>"<<endl;
+                continue;
+            }
+            string ip=arguments[1];
+            int port=stoi(arguments[2]);
+            client.open(ip,port);
+        }
+        else if(command=="ls"){
+            client.ls();
+        }
+        else if(command=="cd"){
+            if(arguments.size()!=2){
+                cout<<"Usage: cd <directory>"<<endl;
+                continue;
+            }
+            string directory=arguments[1];
+            client.cd(directory);
+        }
+        else if(command=="get"){
+            if(arguments.size()!=2){
+                cout<<"Usage: get <filename>"<<endl;
+                continue;
+            }
+            string filename=arguments[1];
+            client.get(filename);
+        }
+        else if(command=="put"){
+            if(arguments.size()!=2){
+                cout<<"Usage: put <filename>"<<endl;
+                continue;
+            }
+            string filename=arguments[1];
+            client.put(filename);
+        }
+        else if(command=="sha256"){
+            if(arguments.size()!=2){
+                cout<<"Usage: sha256 <filename>"<<endl;
+                continue;
+            }
+            string filename=arguments[1];
+            client.sha256(filename);
+        }
+        else if(command=="quit"){
+            client.quit();
+            break;
+        }
+        else{
+            cout<<"Unknown command: "<<command<<endl;
+        }
+    }
     return 0;
 }
