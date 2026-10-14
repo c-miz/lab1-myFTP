@@ -89,10 +89,77 @@ class Client{
             cerr<<"Error: Unable to send header to server"<<endl;
             return;
         }
-        
-
+        char buf[MAXLINE];
+        n=read(sockfd,buf,MAXLINE);
+        if(n<0){
+            cerr<<"Error: Unable to read header from server"<<endl;
+            return;
+        }
+        if(checkHeader(buf)&&buf[6]==0xA4){
+            uint32_t length=ntohl(*(uint32_t*)(buf+8));
+            if(length>12){
+                string listing=NULL;
+                while(listing.size()<length-12){
+                    n=read(sockfd,buf,MAXLINE);
+                    if(bytes_sent<0&&errno==EINTR){
+                        continue;
+                    }
+                    else if(n<=0){
+                        cerr<<"Error: Unable to read listing from server"<<endl;
+                        return;
+                    }
+                    listing.append(buf,n);
+                }
+            }
+            else{
+                cout<<"No files found"<<endl;
+            }
+        }
+        else{
+            cerr<<"Error: Invalid header received"<<endl;
+        }
     }
-    void cd(string directory){}
+    void cd(string directory){
+         if(!isConnected){
+            cerr<<"Error: Not connected to server"<<endl;
+            return;
+        }
+        Header header(0xA5,0,12+directory.size()+1);
+        vector<char> request(sizeof(Header)+directory.size()+1);
+        memcpy(request.data(),&header,sizeof(header));
+        memcpy(request.data()+sizeof(header),directory.c_str(),directory.size()+1);
+        uint32_t sent=0;
+        while(sent<request.size()){
+            size_t bytes_sent=send(sockfd,request.data()+sent,
+                request.size()-sent,MSG_NOSIGNAL);
+            if(bytes_sent<0&&errno==EINTR){
+                continue;  
+            }
+            else if(bytes_sent<=0){
+                cerr<<"Error: Unable to send request to server"<<endl;
+                return;
+            }
+            sent+=bytes_sent;
+        }
+        result=read(sockfd,buf,MAXLINE);
+        if(n<0){
+            cerr<<"Error: Unable to read header from server"<<endl;
+            return;
+        }
+        if(checkHeader(buf)&&buf[6]==0xA6){
+            status status=buf[7];
+            if(status==1){
+                cout<<"Changed directory to "<<directory<<endl;
+            }
+            else{
+                cerr<<"directory does not exist:"<<directory<<endl;
+                return;
+            }
+        }
+        else{
+            cerr<<"Error: Invalid header received"<<endl;
+        }
+    }
     void get(string filename){}
     void put(string filename){}
     void sha256(string filename){}

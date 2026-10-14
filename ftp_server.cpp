@@ -11,10 +11,44 @@
 #include <cstdio>
 #include <cstdint>
 #include <cerrno>
+#include <filesystem>
+#include <system_error>
 #define MAXLINE 4096
 #define LISTENQ 10
+namespace fs = std::filesystem;
 using namespace std;
 bool connncted_ports[65536]={false};
+struct ClientSession {
+    fs::path cwd;  // 当前目录，保存为绝对路径
+};
+bool changeDirectory(ClientSession& session, const std::string& dir) {
+    // 按实验要求，目录名只能包含英文字母和数字
+    if (dir.empty() ||
+        dir.find_first_not_of(
+            "abcdefghijklmnopqrstuvwxyz"
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "0123456789") != std::string::npos) {
+        return false;
+    }
+
+    // 相对于该客户端的当前目录解析
+    fs::path target = session.cwd / dir;
+    std::error_code ec;
+
+    // 不存在、不是目录或检查失败，均返回 false
+    if (!fs::is_directory(target, ec) || ec) {
+        return false;
+    }
+
+    // 转换为规范的绝对路径；失败时不修改原来的 cwd
+    fs::path resolved = fs::canonical(target, ec);
+    if (ec) {
+        return false;
+    }
+
+    session.cwd = resolved;
+    return true;
+}
 struct Header{
     uint8_t m_protocol[6]; /* protocol magic number (6 bytes) */
     uint8_t m_type;                          /* type (1 byte) */
@@ -32,9 +66,10 @@ struct Header{
 bool checkHeader(const char* buf){
     return buf[0]=='\xc1'&&buf[1]=='\xa1'&&buf[2]=='\x10'&&buf[3]=='f'&&buf[4]=='t'&&buf[5]=='p';
 }
-void str_echo(int sockfd){
+void str_echo(int sockfd, const fs::path& initial_dir) {
     ssize_t n;
     char buf[MAXLINE];
+    ClientSession session{initial_dir};
 again:
     while((n=read(sockfd,buf,MAXLINE))>0){
         if(checkHeader(buf)){
@@ -58,7 +93,7 @@ again:
             }
             else if(type==0xA3){
                 cout<<"Received ls command from client"<<endl;
-                FILE* pipe=popen("ls", "r");
+                FILE* pipe=popen(("ls " + session.cwd.string()).c_str(), "r");
                 if(pipe==nullptr){
                     cerr<<"Error: Unable to run ls"<<endl;
                     return;
@@ -98,9 +133,32 @@ again:
                     sent+=static_cast<size_t>(bytes_sent);
                 }
             }
+            else if(type==0xA5){
+                cout<<"Received cd command from client"<<endl;
+                uint32_t length=ntohl(*(uint32_t*)(buf+8));
+                size_t read_bytes=n;
+                while(read_bytes<length){
+                    ssize_t bytes_read=read(sockfd,buf+read_bytes,length-read_bytes);
+                    if(bytes_read<0&&errno==EINTR){
+                        continue;
+                    }
+                    else if(bytes_read<=0){
+                        cerr<<"Error: Unable to read cd request from client"<<endl;
+                        return;
+                    }
+                    read_bytes+=static_cast<size_t>(bytes_read);
+                }
+                string directory(buf+sizeof(Header),length-sizeof(Header));
+                bool success=changeDirectory(session,directory);
+                Header header(0xA6,success?1:0,12);
+                ssize_t n=write(sockfd,&header,sizeof(header));
+                if(n<0){
+                    cerr<<"Error: Unable to send cd reply to client"<<endl;
+                }
 
+            }
             
-
+           
         }
         else{
             cerr<<"Error: Invalid header received"<<endl;
@@ -113,6 +171,7 @@ again:
     }
 }
 int main(int argc, char **argv) {
+    const fs::path initial_dir = fs::current_path();
     string IP_ADDRESS;
     int SERVER_PORT;
     if(argc!=3){
@@ -138,7 +197,7 @@ int main(int argc, char **argv) {
     while(true){
         clilen=sizeof(cliaddr);
         connfd=accept(listenfd,(struct sockaddr*)&cliaddr,&clilen);
-        str_echo(connfd);
+        str_echo(connfd, initial_dir);
         close(connfd);
         
     }
