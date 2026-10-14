@@ -8,20 +8,22 @@
 #include <vector>
 #include <cstring>
 #include <arpa/inet.h>
-#include <studio.h>
+#include <cstdio>
+#include <cstdint>
+#include <cerrno>
 #define MAXLINE 4096
 #define LISTENQ 10
 using namespace std;
 bool connncted_ports[65536]={false};
 struct Header{
-    byte m_protocol[6]; /* protocol magic number (6 bytes) */
-    type m_type;                          /* type (1 byte) */
-    status m_status;                      /* status (1 byte) */
+    uint8_t m_protocol[6]; /* protocol magic number (6 bytes) */
+    uint8_t m_type;                          /* type (1 byte) */
+    uint8_t m_status;                      /* status (1 byte) */
     uint32_t m_length;                    /* length (4 bytes) in Big endian*/
-    Header(type t,status s,uint32_t l):m_type(t),m_status(s),m_length(l){
-        m_protocol[0]=\xc1;
-        m_protocol[1]=\xa1;
-        m_protocol[2]=\x10;
+    Header(uint8_t t,uint8_t s,uint32_t l):m_type(t),m_status(s),m_length(htonl(l)){
+        m_protocol[0]=0xc1;
+        m_protocol[1]=0xa1;
+        m_protocol[2]=0x10;
         m_protocol[3]='f';
         m_protocol[4]='t';
         m_protocol[5]='p';
@@ -36,8 +38,8 @@ void str_echo(int sockfd){
 again:
     while((n=read(sockfd,buf,MAXLINE))>0){
         if(checkHeader(buf)){
-            type type=buf[6];
-            status status=buf[7];
+            uint8_t type=static_cast<uint8_t>(buf[6]);
+            uint8_t status=static_cast<uint8_t>(buf[7]);
             uint32_t length=ntohl(*(uint32_t*)(buf+8));
             if(type==0xA1){
                 Header header(0xA2,1,12);
@@ -47,12 +49,54 @@ again:
                 }
                 else{
                     cout<<"Connected to client"<<endl;
-                    connncted_ports[ntohs(((struct sockaddr_in*)&sockfd)->sin_port)]=true;
+                    struct sockaddr_in peer_addr{};
+                    socklen_t peer_len=sizeof(peer_addr);
+                    if(getpeername(sockfd,reinterpret_cast<struct sockaddr*>(&peer_addr),&peer_len)==0){
+                        connncted_ports[ntohs(peer_addr.sin_port)]=true;
+                    }
                 }
             }
             else if(type==0xA3){
                 cout<<"Received ls command from client"<<endl;
-                
+                FILE* pipe=popen("ls", "r");
+                if(pipe==nullptr){
+                    cerr<<"Error: Unable to run ls"<<endl;
+                    return;
+                }
+
+                string listing;
+                char output[MAXLINE];
+                size_t bytes_read;
+                while((bytes_read=fread(output,1,sizeof(output),pipe))>0){
+                    listing.append(output,bytes_read);
+                }
+                bool read_failed=ferror(pipe)!=0;
+                int exit_status=pclose(pipe);
+                if(read_failed||exit_status!=0){
+                    cerr<<"Error: Unable to read ls output"<<endl;
+                    return;
+                }
+
+                // LIST_REPLY includes the header and a null-terminated listing.
+                Header header(0xA4,0,
+                    static_cast<uint32_t>(sizeof(Header)+listing.size()+1));
+                vector<char> reply(sizeof(Header)+listing.size()+1);
+                memcpy(reply.data(),&header,sizeof(header));
+                memcpy(reply.data()+sizeof(header),listing.c_str(),listing.size()+1);
+
+                size_t sent=0;
+                while(sent<reply.size()){
+                    ssize_t bytes_sent=send(sockfd,reply.data()+sent,
+                        reply.size()-sent,MSG_NOSIGNAL);
+                    if(bytes_sent<0&&errno==EINTR){
+                        continue;
+                    }
+                    if(bytes_sent<=0){
+                        cerr<<"Error: Unable to send ls reply to client"<<endl;
+                        return;
+                    }
+                    sent+=static_cast<size_t>(bytes_sent);
+                }
             }
 
             
@@ -95,6 +139,7 @@ int main(int argc, char **argv) {
         clilen=sizeof(cliaddr);
         connfd=accept(listenfd,(struct sockaddr*)&cliaddr,&clilen);
         str_echo(connfd);
+        close(connfd);
         
     }
     return 0;
