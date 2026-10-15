@@ -216,6 +216,7 @@ class Client{
                             fclose(file);
                             return;
                         }
+                        fwrite(buf,1,n,file);
                         received+=n;
                     }
                     fclose(file);
