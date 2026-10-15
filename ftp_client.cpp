@@ -124,7 +124,7 @@ class Client{
             cerr<<"Error: Not connected to server"<<endl;
             return;
         }
-        Header header(0xA5,0,12+directory.size()+1);
+        Header header(0xA5,0,static_cast<uint32_t>(sizeof(Header)+directory.size()+1));
         vector<char> request(sizeof(Header)+directory.size()+1);
         memcpy(request.data(),&header,sizeof(header));
         memcpy(request.data()+sizeof(header),directory.c_str(),directory.size()+1);
@@ -160,10 +160,219 @@ class Client{
             cerr<<"Error: Invalid header received"<<endl;
         }
     }
-    void get(string filename){}
-    void put(string filename){}
-    void sha256(string filename){}
-    void quit(){}
+    void get(string filename){
+        if(!isConnected){
+            cerr<<"Error: Not connected to server"<<endl;
+            return;
+        }
+        Header header(0xA7,0,static_cast<uint32_t>(sizeof(Header)+filename.size()+1));
+        vector<char> request(sizeof(Header)+filename.size()+1);
+        memcpy(request.data(),&header,sizeof(header));
+        memcpy(request.data()+sizeof(header),filename.c_str(),filename.size()+1);
+        uint32_t sent=0;
+        while(sent<request.size()){
+            size_t bytes_sent=send(sockfd,request.data()+sent,
+                request.size()-sent,MSG_NOSIGNAL);
+            if(bytes_sent<0&&errno==EINTR){
+                continue;  
+            }
+            else if(bytes_sent<=0){
+                cerr<<"Error: Unable to send request to server"<<endl;
+                return;
+            }
+            sent+=bytes_sent;
+        }
+        s_size_t n=read(sockfd,buf,MAXLINE);
+        if(n<0){
+            cerr<<"Error: Unable to read header from server"<<endl;
+            return;
+        }
+        if(checkHeader(buf)&&buf[6]==0xA8){
+            status status=buf[7];
+            if(status==0){
+                cerr<<"Error: File "<<filename<<" does not exist on server"<<endl;
+            }
+            else{
+                n=read(sockfd,buf,MAXLINE);
+                if(n<0){
+                    cerr<<"Error: Unable to read file from server"<<endl;
+                    return;
+                }
+                if(checkHeader(buf)&&buf[6]==0xFF){
+                    static_cast<uint32_t>file_size=ntohl(*(uint32_t*)(buf+8))-12;
+                    FILE* file=fopen(filename.c_str(),"wb");
+                    if(file==nullptr){
+                        cerr<<"Error: Unable to open file "<<filename<<" for writing"<<endl;
+                        return;
+                    }
+                    size_t received=0;
+                    while(received<file_size){
+                        n=read(sockfd,buf,MAXLINE);
+                        if(n<0&&errno==EINTR){
+                            continue;
+                        }
+                        if(n<=0){
+                            cerr<<"Error: Unable to read file from server"<<endl;
+                            fclose(file);
+                            return;
+                        }
+                        received+=n;
+                    }
+                    fclose(file);
+                }
+            }
+        }
+        else{
+            cerr<<"Error: Invalid header received"<<endl;
+        }
+    }
+    void put(string filename){
+        if(!isConnected){
+            cerr<<"Error: Not connected to server"<<endl;
+            return;
+        }
+        if(fs:exists(filename)&&fs::is_regular_file(filename)){
+            Header header(0xA9,0,12+static_cast<uint32_t>size_of(filename)+1);
+            vector<char> request(sizeof(Header)+filename.size()+1);
+            memcpy(request.data(),&header,sizeof(header));
+            memcpy(request.data()+sizeof(header),filename.c_str(),filename.size()+1);
+            uint32_t sent=0;
+            while(sent<request.size()){
+                size_t bytes_sent=send(sockfd,request.data()+sent,
+                    request.size()-sent,MSG_NOSIGNAL);
+                if(bytes_sent<0&&errno==EINTR){
+                    continue;  
+                }
+                else if(bytes_sent<=0){
+                    cerr<<"Error: Unable to send request to server"<<endl;
+                    return;
+                }
+                sent+=bytes_sent;
+            }
+            ssize_t n=read(sockfd,buf,MAXLINE);
+            if(n<0){
+                cerr<<"Error: Unable to read header from server"<<endl;
+                return;
+            }
+            if(checkHeader(buf)&&buf[6]==0xAA){
+                    fs::path file_path=fs::absolute(filename);
+                    FILE* file=fopen(file_path.c_str(),"rb");
+                    if(file==nullptr){
+                        cerr<<"Error: Unable to open file "<<filename<<" for reading"<<endl;
+                        return;
+                    }
+                    Header header(0xFF,0,12+static_cast<uint32_t>(fs::file_size(file_path)));
+                    ssize_t n=write(sockfd,&header,sizeof(header));
+                    if(n<0){
+                        cerr<<"Error: Unable to send header to server"<<endl;
+                        fclose(file);
+                        return;
+                    }
+                    char buf[MAXLINE];
+                    size_t n;
+                    while((n=fread(buf,1,sizeof(buf),file))>0){
+                        size_t sent=0;
+                        while(sent<n){
+                            ssize_t bytes_sent=send(sockfd,buf+sent,n-sent,MSG_NOSIGNAL);
+                            if(bytes_sent<0&&errno==EINTR){
+                                continue;
+                            }
+                            else if(bytes_sent<=0){
+                                cerr<<"Error: Unable to send file to server"<<endl;
+                                fclose(file);
+                                return;
+                            }
+                            sent+=static_cast<size_t>(bytes_sent);
+                        }
+                    }
+                    fclose(file);
+            }
+
+        }
+        else{
+            cerr<<"Error: File "<<filename<<" does not exist"<<endl;
+            return;
+        }
+    }
+    void sha256(string filename){
+        if(!isConnected){
+            cerr<<"Error: Not connected to server"<<endl;
+            return;
+        }
+        Header header(0xAB,0,static_cast<uint32_t>(sizeof(Header)+filename.size()+1));
+        vector<char> request(sizeof(Header)+filename.size()+1);
+        memcpy(request.data(),&header,sizeof(header));
+        memcpy(request.data()+sizeof(header),filename.c_str(),filename.size()+1);
+        uint32_t sent=0;
+        while(sent<request.size()){
+            size_t bytes_sent=send(sockfd,request.data()+sent,
+                request.size()-sent,MSG_NOSIGNAL);
+            if(bytes_sent<0&&errno==EINTR){
+                continue;  
+            }
+            else if(bytes_sent<=0){
+                cerr<<"Error: Unable to send request to server"<<endl;
+                return;
+            }
+            sent+=bytes_sent;
+        }
+        ssize_t n=read(sockfd,buf,MAXLINE);
+        if(n<0){
+            cerr<<"Error: Unable to read header from server"<<endl;
+            return;
+        }
+        if(checkHeader(buf)&&buf[6]==0xAC){
+            status status=buf[7];
+            if(status==0){
+                cerr<<"Error: File "<<filename<<" does not exist on server"<<endl;
+                return;
+            }
+            else{
+                n=read(sockfd,buf,MAXLINE);
+                if(n<0){
+                    cerr<<"Error: Unable to read hash from server"<<endl;
+                    return;
+                }
+                if(checkHeader(buf)&&buf[6]==0xFF){
+                    uint32_t length=ntohl(*(uint32_t*)(buf+8));
+                    string hash(buf+sizeof(Header),length-sizeof(Header));
+                    cout<<hash<<endl;
+                }
+                else{
+                    cerr<<"Error: Invalid header received"<<endl;
+                }
+            }
+        }
+        else{
+            cerr<<"Error: Invalid header received"<<endl;
+        }
+    }
+    bool quit(){
+        if(isConnected){
+            Header header(0xAD,0,12);
+            ssize_t n=write(sockfd,&header,sizeof(header));
+            if(n<0){
+                cerr<<"Error: Unable to send header to server"<<endl;
+            }
+            n=read(sockfd,buf,MAXLINE);
+            if(n<0){
+                cerr<<"Error: Unable to read header from server"<<endl;
+                return;
+            }
+            if(checkHeader(buf)&&buf[6]==0xAE){
+                cout<<"Disconnected from server"<<endl;
+                close(sockfd);
+                isConnected=false;
+                return 0;
+            }
+            else{
+                cerr<<"Error: Invalid header received"<<endl;
+            }
+        }
+        else{
+            return 1;
+        }
+    }
 
 };
 vector<string> parseCommand(const string& line) {
@@ -234,8 +443,9 @@ int main() {
             client.sha256(filename);
         }
         else if(command=="quit"){
-            client.quit();
-            break;
+            if(client.quit()){
+                break;
+            }
         }
         else{
             cout<<"Unknown command: "<<command<<endl;

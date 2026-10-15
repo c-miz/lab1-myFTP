@@ -17,7 +17,6 @@
 #define LISTENQ 10
 namespace fs = std::filesystem;
 using namespace std;
-bool connncted_ports[65536]={false};
 struct ClientSession {
     fs::path cwd;  // 当前目录，保存为绝对路径
 };
@@ -84,11 +83,6 @@ again:
                 }
                 else{
                     cout<<"Connected to client"<<endl;
-                    struct sockaddr_in peer_addr{};
-                    socklen_t peer_len=sizeof(peer_addr);
-                    if(getpeername(sockfd,reinterpret_cast<struct sockaddr*>(&peer_addr),&peer_len)==0){
-                        connncted_ports[ntohs(peer_addr.sin_port)]=true;
-                    }
                 }
             }
             else if(type==0xA3){
@@ -111,7 +105,6 @@ again:
                     cerr<<"Error: Unable to read ls output"<<endl;
                     return;
                 }
-
                 // LIST_REPLY includes the header and a null-terminated listing.
                 Header header(0xA4,0,
                     static_cast<uint32_t>(sizeof(Header)+listing.size()+1));
@@ -157,7 +150,205 @@ again:
                 }
 
             }
-            
+            else if(type==0xA7){
+                cout<<"Received get command from client"<<endl;
+                uint32_t length=ntohl(*(uint32_t*)(buf+8));
+                size_t read_bytes=n;
+                while(read_bytes<length){
+                    ssize_t bytes_read=read(sockfd,buf+read_bytes,length-read_bytes);
+                    if(bytes_read<0&&errno==EINTR){
+                        continue;
+                    }
+                    else if(bytes_read<=0){
+                        cerr<<"Error: Unable to read get request from client"<<endl;
+                        return;
+                    }
+                    read_bytes+=static_cast<size_t>(bytes_read);
+                }
+                string filename(buf+sizeof(Header),length-sizeof(Header));
+                fs::path file_path=session.cwd/filename;
+                if(!fs::exists(file_path)||!fs::is_regular_file(file_path)){
+                    Header header(0xA8,0,12);
+                    ssize_t n=write(sockfd,&header,sizeof(header));
+                    if(n<0){
+                        cerr<<"Error: Unable to send get reply to client"<<endl;
+                    }
+                    return;
+                }
+                else{
+                    Header header(0xA8,1,12);
+                    ssize_t n=write(sockfd,&header,sizeof(header));
+                    if(n<0){
+                        cerr<<"Error: Unable to send get reply to client"<<endl;
+                    }
+                    else{
+                        FILE* file=fopen(file_path.c_str(),"rb");
+                        if(file==nullptr){
+                            Header header(0xFF,0,12);
+                            ssize_t n=write(sockfd,&header,sizeof(header));
+                            if(n<0){
+                                cerr<<"Error: Unable to send header to client"<<endl;
+                            }
+                        }
+                        else{
+                            char buf[MAXLINE];
+                            size_t n;
+                            Header header(0xFF,1,12+static_cast<uint32_t>(fs::file_size(file_path)));
+                            ssize_t n=write(sockfd,&header,sizeof(header));
+                            while((n=fread(buf,1,sizeof(buf),file))>0){
+                                size_t sent=0;
+                                while(sent<n){
+                                    ssize_t bytes_sent=send(sockfd,buf+sent,n-sent,MSG_NOSIGNAL);
+                                    if(bytes_sent<0&&errno==EINTR){
+                                        continue;
+                                    }
+                                    else if(bytes_sent<=0){
+                                        cerr<<"Error: Unable to send file to client"<<endl;
+                                        fclose(file);
+                                        return;
+                                    }
+                                    sent+=static_cast<size_t>(bytes_sent);
+                                }
+                            }
+                        }
+                        fclose(file);
+                    }
+                }
+            }
+            else if(type==0xA9){
+                static_cast<uint32_t>length=ntohl(*(uint32_t*)(buf+8));
+                size_t read_bytes=n;
+                while(read_bytes<length){
+                    ssize_t bytes_read=read(sockfd,buf+read_bytes,length-read_bytes);
+                    if(bytes_read<0&&errno==EINTR){
+                        continue;
+                    }
+                    if(bytes_read<=0){
+                        cerr<<"Error: Unable to read file from client"<<endl;
+                        return;
+                    }
+                    read_bytes+=static_cast<size_t>(bytes_read);
+                }
+                string filename(buf+sizeof(Header),length-sizeof(Header));
+                fs::path file_path=session.cwd/filename;
+                Header header(0xAA,0,12);
+                ssize_t n=write(sockfd,&header,sizeof(header));
+                if(n<0){
+                    cerr<<"Error: Unable to send put reply to client"<<endl;
+                }
+                n=read(sockfd,buf,MAXLINE);
+                if(n<0){
+                    cerr<<"Error: Unable to read header from client"<<endl;
+                    return;
+                }
+                if(checkHeader(buf)&&buf[6]==0xFF){
+                    uint32_t length=ntohl(*(uint32_t*)(buf+8));
+                    FILE* file=fopen(file_path.c_str(),"wb");
+                    if(file==nullptr){
+                        cerr<<"Error: Unable to open file "<<filename<<" for writing"<<endl;
+                        return;
+                    }
+                    size_t received=0;
+                    while(received<length){
+                        ssize_t bytes_read=read(sockfd,buf,MAXLINE);
+                        if(bytes_read<0&&errno==EINTR){
+                            continue;
+                        }
+                        else if(bytes_read<=0){
+                            cerr<<"Error: Unable to read file from client"<<endl;
+                            fclose(file);
+                            return;
+                        }
+                        size_t bytes_written=fwrite(buf,1,static_cast<size_t>(bytes_read),file);
+                        if(bytes_written<static_cast<size_t>(bytes_read)){
+                            cerr<<"Error: Unable to write to file "<<filename<<endl;
+                            fclose(file);
+                            return;
+                        }
+                        received+=static_cast<size_t>(bytes_read);
+                    }
+                    fclose(file);
+                }
+                else{
+                    cerr<<"Error: Invalid header received"<<endl;
+                }
+            }
+            else if(type==0xAB){
+                static_cast<uint32_t>length=ntohl(*(uint32_t*)(buf+8));
+                size_t read_bytes=n;
+                while(read_bytes<length){
+                    ssize_t bytes_read=read(sockfd,buf+read_bytes,length-read_bytes);
+                    if(bytes_read<0&&errno==EINTR){
+                        continue;
+                    }
+                    if(bytes_read<=0){
+                        cerr<<"Error: Unable to read file from client"<<endl;
+                        return;
+                    }
+                    read_bytes+=static_cast<size_t>(bytes_read);
+                }
+                string filename(buf+sizeof(Header),length-sizeof(Header));
+                fs::path file_path=session.cwd/filename;
+                if(!fs::exists(file_path)||!fs::is_regular_file(file_path)){
+                    Header header(0xAC,0,12);
+                    ssize_t n=write(sockfd,&header,sizeof(header));
+                    if(n<0){
+                        cerr<<"Error: Unable to send sha256 reply to client"<<endl;
+                    }
+                    return;
+                }
+                else{
+                    Header header(0xAC,1,12);
+                    ssize_t n=write(sockfd,&header,sizeof(header));
+                    if(n<0){
+                        cerr<<"Error: Unable to send sha256 reply to client"<<endl;
+                    }
+                    else{
+                        string command="sha256sum " + file_path.string();
+                        FILE* pipe=popen(command.c_str(),"r");
+                        if(pipe==nullptr){
+                            cerr<<"Error: Unable to run sha256sum"<<endl;
+                            return;
+                        }
+                        string hash;
+                        char output[MAXLINE];
+                        size_t bytes_read;
+                        while((bytes_read=fread(output,1,sizeof(output),pipe))>0){
+                            hash.append(output,bytes_read);
+                        }
+                        pclose(pipe);
+                        Header header(0xFF,0,12+static_cast<uint32_t>(hash.size()+1));
+                        vector<char> reply(sizeof(Header)+hash.size()+1);
+                        memcpy(reply.data(),&header,sizeof(header));
+                        memcpy(reply.data()+sizeof(Header),hash.c_str(),hash.size()+1);
+                        size_t sent=0;
+                        while(sent<reply.size()){
+                            ssize_t bytes_sent=send(sockfd,reply.data()+sent,
+                                reply.size()-sent,MSG_NOSIGNAL);
+                            if(bytes_sent<0&&errno==EINTR){
+                                continue;
+                            }
+                            if(bytes_sent<=0){
+                                cerr<<"Error: Unable to send reply to client"<<endl;
+                                return;
+                            }
+                            sent+=static_cast<size_t>(bytes_sent);
+                        }
+                    }
+                }
+            }
+            else if(type==0xAD){
+                cout<<"Received quit command from client"<<endl;
+                Header header(0xAE,0,12);
+                ssize_t n=write(sockfd,&header,sizeof(header));
+                if(n<0){
+                    cerr<<"Error: Unable to send quit reply to client"<<endl;
+                }
+                return;
+            }
+            else{
+                cerr<<"Error: Unknown command received"<<endl;
+            }
            
         }
         else{
